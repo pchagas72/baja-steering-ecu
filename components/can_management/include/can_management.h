@@ -11,6 +11,12 @@
 #define ID_VOLTAGE      0x502
 #define ID_FUEL         0x500
 
+typedef enum {
+    CVT,
+    BAT,
+    FUEL,
+} box_message;
+
 // --- Data Structure for the Dashboard ---
 typedef struct {
     uint16_t rpm;
@@ -22,6 +28,8 @@ typedef struct {
     float voltage;
     uint16_t fuel;
     bool link_active;   // Safety flag
+    bool box_alert;
+    box_message box_alert_message;
 } car_state_t;
 
 void can_init(void);

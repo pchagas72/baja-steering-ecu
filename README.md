@@ -32,7 +32,12 @@ This project uses the **Espressif IoT Development Framework (ESP-IDF)**.
 
 ## Todo:
 
-- Add more logs [ ]
+- [ ] Add variables to the ESP bios
+- Add more logs
+    - [ ] CAN logging
+- Receive flags from COM ecus [ ]
+    - [ ] BOX to PILOT alert flags
 - Send data to the CAN network [ ]
     - Pilot to box alert [ ]
-    - Emergency alert [ ]
+    - Emergency alerts [ ]
+        - [ ] No Radio - interface shows "Radio down"

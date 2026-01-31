@@ -114,7 +114,7 @@ void sd_log_data(car_state_t *car, uint32_t timestamp_ms)
             car->pitch
     );
 
-    // Close immediately to save data in case of power loss
+    // Close immediately to save data in case of power loss (Baja vibration!)
     fclose(f);
 }
 

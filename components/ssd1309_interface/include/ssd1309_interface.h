@@ -32,6 +32,7 @@ void ssd1309_draw_char(uint8_t *buffer, int x, int y, char c);
 void ssd1309_draw_string(uint8_t *buffer, int x, int y, const char *format, ...);
 void ssd1309_draw_string_large(uint8_t *buffer, int x, int y, int size, const char *format, ...);
 void ssd1309_draw_line(uint8_t *buffer, int x0, int y0, int x1, int y1, int color);
+void ssd1309_draw_bitmap(uint8_t *fb, int x, int y, const uint8_t *bitmap, int w, int h, int color);
 
 #ifdef __cplusplus
 }

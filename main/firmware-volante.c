@@ -7,6 +7,7 @@
 #include "esp_timer.h"
 #include "ssd1309_interface.h"
 #include "can_management.h"
+#include "icons.h"
 
 // Hardware configurations
 // Check the can_management.h and ssd1309_interface.h for CAN and I2C
@@ -16,7 +17,7 @@
 // Settings
 #define FILTER_ALPHA    0.1f  // 0.1 = Smooth/Slow, 1.0 = Instant/Jittery
 #define TIMEOUT_MS      1500  // Time before "NO DATA" error in ms
-
+                                    
 // Different screen modes
 typedef enum {
     MODE_PILOT = 0,
@@ -28,6 +29,7 @@ typedef enum {
 
 static dash_mode_t current_mode = MODE_PILOT;
 static uint8_t s_buffer[SSD1309_BUFFER_SIZE];
+static int64_t race_start_time = 0;
 
 // Filtering (keep these as floats)
 typedef struct {
@@ -38,6 +40,17 @@ typedef struct {
 filter_t signal_filter = {0};
 
 // Graphics
+
+void draw_race_timer(uint8_t *fb, int x, int y) {
+    int64_t now = esp_timer_get_time();
+    int64_t diff = (now - race_start_time) / 1000000; // Convert micros to seconds
+    
+    int hour = (diff / 3600) % 60;
+    int min = (diff / 60) % 60;
+    int sec = diff % 60;
+    
+    ssd1309_draw_string(fb, x, y, "%02d:%02d:%02d",hour, min, sec);
+}
 
 // Draw Arc (Bresenham-ish approximation)
 void draw_arc(uint8_t *fb, int cx, int cy, int r, int start_angle, int end_angle) {
@@ -52,20 +65,33 @@ void draw_arc(uint8_t *fb, int cx, int cy, int r, int start_angle, int end_angle
     }
 }
 
-// Analog Gauge, useful for the night mode
-void draw_analog_gauge(uint8_t *fb, int cx, int cy, int r, float val, float max_val, const char* label) {
-    int start_deg = 220;
-    int end_deg = -40;
+void draw_dynamic_gauge(uint8_t *fb, int cx, int cy, int r, float val, float max_val, const char* label, float split_pct) {
+    int start_deg = 220; // 0% position
+    int end_deg = -40;   // 100% position
     int total_sweep = start_deg - end_deg;
+    
+    // Calculate the angle where the gauge "breaks" (e.g. at 60%)
+    int split_deg = start_deg - (int)(total_sweep * split_pct);
 
-    // 1. Arc
-    draw_arc(fb, cx, cy, r, start_deg, end_deg);
+    // Determine Visibility
+    bool unlocked = (val > (max_val * split_pct * 0.95f)); 
 
-    // 2. Ticks
+    int current_visible_end = unlocked ? end_deg : split_deg;
+
+    // Draw Arc (Only the visible part)
+    draw_arc(fb, cx, cy, r, start_deg, current_visible_end);
+
+    // Draw Ticks
     int num_ticks = 5;
     for (int i = 0; i <= num_ticks; i++) {
-        float angle = start_deg - (i * (total_sweep / (float)num_ticks));
+        float tick_pct = (float)i / num_ticks;
+        
+        // If locked, skip ticks that are in the hidden zone
+        if (!unlocked && tick_pct > split_pct) continue;
+
+        float angle = start_deg - (tick_pct * total_sweep);
         float rad = angle * (3.14159f / 180.0f);
+        
         int x0 = cx + (int)(r * cos(rad));
         int y0 = cy - (int)(r * sin(rad));
         int len = (i==0 || i==num_ticks) ? 6 : 3;
@@ -74,20 +100,23 @@ void draw_analog_gauge(uint8_t *fb, int cx, int cy, int r, float val, float max_
         ssd1309_draw_line(fb, x0, y0, x1, y1, 1);
     }
 
-    // 3. Needle
-    float angle = start_deg - ((val / max_val) * total_sweep);
-    if (angle > start_deg) angle = start_deg;
-    if (angle < end_deg) angle = end_deg;
-    float rad = angle * (3.14159f / 180.0f);
+    // Draw Needle
+    // Map value to angle
+    float current_angle = start_deg - ((val / max_val) * total_sweep);
+    if (current_angle > start_deg) current_angle = start_deg;
+    if (current_angle < end_deg) current_angle = end_deg;
+
+    float rad = current_angle * (3.14159f / 180.0f);
     int tip_x = cx + (int)((r - 2) * cos(rad));
     int tip_y = cy - (int)((r - 2) * sin(rad));
     ssd1309_draw_line(fb, cx, cy, tip_x, tip_y, 1);
     
-    // 4. Hub & Text
+    // Center Hub & Text
     ssd1309_draw_rect(fb, cx-2, cy-2, 5, 5, 1, 1);
+    
     int txt_x = (val < 10) ? cx-3 : (val < 100) ? cx-6 : cx-9;
     ssd1309_draw_string(fb, txt_x, cy+6, "%.0f", val);
-    ssd1309_draw_string(fb, cx-8, cy-8, label);
+    ssd1309_draw_string(fb, cx-10, cy-8, label);
 }
 
 // Drawing Functions
@@ -104,10 +133,45 @@ void draw_pilot(uint8_t *fb, car_state_t *car) {
     int bar_w = (car->rpm * 126) / 3800;
     if(bar_w > 126) bar_w = 126;
     for(int i=2; i<bar_w; i+=2) ssd1309_draw_rect(fb, i, 2, 1, 4, 1, 1);
-    
+    bool show_fuel = (car->fuel < 20);
+    bool show_bat = (car->voltage < 11.8);
+    bool show_cvt = (car->cvt_temp > 90);
+    bool show_eng = (car->eng_temp > 90);
+
     // Warnings
-    if(car->cvt_temp > 85) ssd1309_draw_string(fb, 45, 54, "CVT HOT!");
-    else ssd1309_draw_string(fb, 5, 54, "CVT:%d", car->cvt_temp);
+
+    // Low Fuel Warning
+    if (show_fuel) {
+        if (xTaskGetTickCount() % 20 < 10) {
+            ssd1309_draw_string(fb, 30, 56, "F");
+            // ssd1309_draw_bitmap(fb, 30, 56, icon_fuel, 16, 16, 1); // I don't know how to draw.
+        }
+    }
+
+    // Low Fuel Warning
+    if (show_bat) {
+        if (xTaskGetTickCount() % 20 < 10) {
+            ssd1309_draw_string(fb, 20, 56, "B");
+        }
+    }
+
+    // Low Fuel Warning
+    if (show_cvt) {
+        if (xTaskGetTickCount() % 20 < 10) {
+            ssd1309_draw_string(fb, 10, 56, "T");
+        }
+    }
+
+    if (show_eng) {
+        if (xTaskGetTickCount() % 20 < 10) {
+            ssd1309_draw_string(fb, 0, 56, "E");
+        }
+    }
+
+
+
+    // Timing
+    draw_race_timer(fb, 80, 56);
 }
 
 // Heavy data mode
@@ -116,12 +180,12 @@ void draw_engineer(uint8_t *fb, car_state_t *car) {
     ssd1309_draw_string(fb, 0, 0, "SYSTEM: ONLINE");
     ssd1309_draw_line(fb, 0, 10, 128, 10, 1);
     
-    ssd1309_draw_string(fb, 0,  15, "RPM:  %d", car->rpm);
-    ssd1309_draw_string(fb, 64, 15, "SPD:  %d", car->speed);
-    ssd1309_draw_string(fb, 0,  28, "ENG:  %d C", car->eng_temp);
-    ssd1309_draw_string(fb, 64, 28, "CVT:  %d C", car->cvt_temp);
-    ssd1309_draw_string(fb, 0,  41, "BAT:  %.1fV", car->voltage);
-    ssd1309_draw_string(fb, 64, 41, "FUEL: %d%%", car->fuel);
+    ssd1309_draw_string(fb, 0,  15, "RPM:%d", car->rpm);
+    ssd1309_draw_string(fb, 65, 15, "SPD:%dkm/h", car->speed);
+    ssd1309_draw_string(fb, 0,  28, "ENG:%d C", car->eng_temp);
+    ssd1309_draw_string(fb, 65, 28, "CVT:%d C", car->cvt_temp);
+    ssd1309_draw_string(fb, 0,  41, "BAT:%.1fV", car->voltage);
+    ssd1309_draw_string(fb, 65, 41, "FUEL:%d%%", car->fuel);
     ssd1309_draw_string(fb, 0, 54, "R:%d P:%d", car->roll, car->pitch);
 }
 
@@ -154,23 +218,52 @@ void draw_adventure(uint8_t *fb, car_state_t *car) {
 // Still needs much tweaking
 void draw_night_mode(uint8_t *fb, car_state_t *car) {
     ssd1309_clear_buffer(fb);
-    bool show_rpm = (car->rpm > 2800); 
     bool show_fuel = (car->fuel < 20);
+    bool show_bat = (car->voltage < 11.8);
+    bool show_cvt = (car->cvt_temp > 90);
+    bool show_eng = (car->eng_temp > 90);
 
     // Speedometer (Centered Left)
-    draw_analog_gauge(fb, 32, 32, 28, car->speed, 60.0f, "KPH");
+    draw_dynamic_gauge(fb, 32, 32, 28, car->speed, 55.0f, "KPH", 0.65f);
 
     // Tachometer (Centered Right - Ghost)
-    if (show_rpm) {
-        draw_analog_gauge(fb, 96, 32, 28, car->rpm, 3800.0f, "RPM");
-        if(car->rpm > 3600) ssd1309_draw_rect(fb, 120, 0, 8, 64, 1, 1); // Shift Light
+    if (car->rpm > 3400) {
+        if (xTaskGetTickCount() % 20 < 10) {
+            draw_dynamic_gauge(fb, 96, 32, 28, car->rpm, 3800.0f, "RPM", 0.65f);
+        }
+    } else{
+        draw_dynamic_gauge(fb, 96, 32, 28, car->rpm, 3800.0f, "RPM", 0.65f);
     }
 
     // Low Fuel Warning
     if (show_fuel) {
-        ssd1309_draw_rect(fb, 54, 50, 20, 10, 1, 1);
-        ssd1309_draw_string(fb, 56, 38, "FUEL");
+        if (xTaskGetTickCount() % 20 < 10) {
+            ssd1309_draw_string(fb, 30, 56, "F");
+            // ssd1309_draw_bitmap(fb, 30, 56, icon_fuel, 16, 16, 1); // I don't know how to draw.
+        }
     }
+
+    // Low Fuel Warning
+    if (show_bat) {
+        if (xTaskGetTickCount() % 20 < 10) {
+            ssd1309_draw_string(fb, 20, 56, "B");
+        }
+    }
+
+    // Low Fuel Warning
+    if (show_cvt) {
+        if (xTaskGetTickCount() % 20 < 10) {
+            ssd1309_draw_string(fb, 10, 56, "T");
+        }
+    }
+
+    if (show_eng) {
+        if (xTaskGetTickCount() % 20 < 10) {
+            ssd1309_draw_string(fb, 0, 56, "E");
+        }
+    }
+
+    draw_race_timer(fb, 80, 56);
 }
 
 // Main function, no FreeRTOS needed here
@@ -186,6 +279,8 @@ void app_main(void)
     car_state_t car = {0};
     int64_t last_pkt_time = 0;
     int64_t last_btn_time = 0;
+
+    race_start_time = esp_timer_get_time();
 
     ESP_LOGI(TAG, "Dashboard Initialized.");
 
@@ -211,7 +306,6 @@ void app_main(void)
             car.link_active = false;
             car.rpm = 0; car.speed = 0; // Kill gauges
         }
-
         // Check for button input
         if (gpio_get_level(PIN_BUTTON) == 0) {
             if (now - last_btn_time > 300) { 
@@ -221,12 +315,24 @@ void app_main(void)
             }
         }
 
+
         // Render screen
         if (!car.link_active) {
             ssd1309_clear_buffer(s_buffer);
             ssd1309_draw_rect(s_buffer, 0, 0, 128, 64, 1, 0); // Warning border
             ssd1309_draw_string_large(s_buffer, 15, 20, 2, "NO LINK");
             ssd1309_draw_string(s_buffer, 35, 45, "CHECK ECU");
+        } else if (car.box_alert) {
+            if (xTaskGetTickCount() % 20 < 10) {
+                ssd1309_clear_buffer(s_buffer);
+                ssd1309_draw_rect(s_buffer, 0, 0, 128, 64, 1, 0); // Warning border
+                ssd1309_draw_string_large(s_buffer, 15, 20, 2, "BOX BOX!");
+                switch (car.box_alert_message) {
+                    case CVT: ssd1309_draw_string(s_buffer, 35, 45, "CVT ISSUE"); break;
+                    case FUEL: ssd1309_draw_string(s_buffer, 35, 45, "REFUEL"); break;
+                    case BAT: ssd1309_draw_string(s_buffer, 35, 45, "BAT SWITCH"); break;
+                }
+            }
         } else {
             switch(current_mode) {
                 case MODE_PILOT:     draw_pilot(s_buffer, &car); break;

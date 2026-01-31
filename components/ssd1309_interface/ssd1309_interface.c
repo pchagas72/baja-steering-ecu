@@ -313,3 +313,16 @@ void ssd1309_draw_line(uint8_t *buffer, int x0, int y0, int x1, int y1, int colo
         if (e2 <= dx) { err += dx; y0 += sy; }
     }
 }
+
+void ssd1309_draw_bitmap(uint8_t *fb, int x, int y, const uint8_t *bitmap, int w, int h, int color) {
+    int byteWidth = (w + 7) / 8; // How many bytes per row
+    
+    for (int j = 0; j < h; j++) {
+        for (int i = 0; i < w; i++) {
+            // Read bit from the byte array
+            if (bitmap[j * byteWidth + i / 8] & (128 >> (i & 7))) {
+                ssd1309_draw_pixel(fb, x + i, y + j, color);
+            }
+        }
+    }
+}
