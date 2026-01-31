@@ -27,7 +27,7 @@ typedef enum {
     MODE_COUNT
 } dash_mode_t;
 
-static dash_mode_t current_mode = MODE_PILOT;
+static dash_mode_t current_mode = MODE_NIGHT;
 static uint8_t s_buffer[SSD1309_BUFFER_SIZE];
 static int64_t race_start_time = 0;
 
@@ -280,9 +280,15 @@ void app_main(void)
     int64_t last_pkt_time = 0;
     int64_t last_btn_time = 0;
 
-    race_start_time = esp_timer_get_time();
-
     ESP_LOGI(TAG, "Dashboard Initialized.");
+
+    while (gpio_get_level(PIN_BUTTON) !=0) {
+        ssd1309_draw_string_large(s_buffer, 10, 20, 2, "MANGUE");
+        ssd1309_draw_string_large(s_buffer, 55, 40, 2, "BAJA");
+        ssd1309_display_buffer(s_buffer);
+    }
+
+    race_start_time = esp_timer_get_time();
 
     while(1) {
         int64_t now = esp_timer_get_time() / 1000;
