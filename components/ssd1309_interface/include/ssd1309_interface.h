@@ -1,5 +1,6 @@
 #pragma once
 #include "esp_err.h"
+#include "driver/i2c_master.h" // New driver [cite: 62]
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -18,11 +19,10 @@ extern "C" {
 #define SCREEN_HEIGHT               64
 #define SSD1309_BUFFER_SIZE         1024
 
-// Core Functions
-esp_err_t i2c_master_init(void);
-void ssd1309_init(void);
-// Returns ESP_FAIL if the screen froze
-esp_err_t ssd1309_display_buffer(uint8_t *buffer);
+// Core Functions - Updated for new driver handles
+esp_err_t ssd1309_hw_init(i2c_master_bus_handle_t *bus_handle, i2c_master_dev_handle_t *dev_handle);
+void ssd1309_init(i2c_master_dev_handle_t dev_handle);
+esp_err_t ssd1309_display_buffer(i2c_master_dev_handle_t dev_handle, uint8_t *buffer);
 void ssd1309_clear_buffer(uint8_t *buffer);
 
 // Graphics

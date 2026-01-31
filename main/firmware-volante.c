@@ -7,7 +7,7 @@
 #include "esp_timer.h"
 #include "ssd1309_interface.h"
 #include "can_management.h"
-#include "icons.h"
+//#include "icons.h"
 
 // Hardware configurations
 // Check the can_management.h and ssd1309_interface.h for CAN and I2C
@@ -269,8 +269,12 @@ void draw_night_mode(uint8_t *fb, car_state_t *car) {
 // Main function, no FreeRTOS needed here
 void app_main(void)
 {
-    ESP_ERROR_CHECK(i2c_master_init());
-    ssd1309_init();
+    i2c_master_bus_handle_t bus_handle;
+    i2c_master_dev_handle_t screen_handle;
+
+    // Initialize using new driver [cite: 88, 120, 134]
+    ESP_ERROR_CHECK(ssd1309_hw_init(&bus_handle, &screen_handle));
+    ssd1309_init(screen_handle);
     can_init(); // Pin 5 (TX) - Pin 18 (RX)
 
     gpio_set_direction(PIN_BUTTON, GPIO_MODE_INPUT);
@@ -285,7 +289,7 @@ void app_main(void)
     while (gpio_get_level(PIN_BUTTON) !=0) {
         ssd1309_draw_string_large(s_buffer, 10, 20, 2, "MANGUE");
         ssd1309_draw_string_large(s_buffer, 55, 40, 2, "BAJA");
-        ssd1309_display_buffer(s_buffer);
+        ssd1309_display_buffer(screen_handle, s_buffer);
     }
 
     race_start_time = esp_timer_get_time();
@@ -349,7 +353,7 @@ void app_main(void)
             }
         }
 
-        ssd1309_display_buffer(s_buffer);
-        vTaskDelay(pdMS_TO_TICKS(10)); // 100 FPS target (system permitting)
+        ssd1309_display_buffer(screen_handle, s_buffer);
+        vTaskDelay(pdMS_TO_TICKS(30)); // 100 FPS target (system permitting)
     }
 }

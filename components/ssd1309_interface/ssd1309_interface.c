@@ -1,6 +1,6 @@
 #include "include/ssd1309_interface.h"
 #include "driver/gpio.h"
-#include "driver/i2c.h"
+#include "driver/i2c_master.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <string.h>
@@ -106,119 +106,93 @@ const uint8_t font[] = {
     0x44, 0x64, 0x54, 0x4C, 0x44  // z
 };
 
-static void i2c_bus_reset(void) {
-    gpio_reset_pin(I2C_MASTER_SCL_IO);
-    gpio_set_direction(I2C_MASTER_SCL_IO, GPIO_MODE_OUTPUT);
-    for(int i=0; i<9; i++) {
-        gpio_set_level(I2C_MASTER_SCL_IO, 0);
-        vTaskDelay(pdMS_TO_TICKS(1)); 
-        gpio_set_level(I2C_MASTER_SCL_IO, 1);
-        vTaskDelay(pdMS_TO_TICKS(1));
-    }
-    gpio_reset_pin(I2C_MASTER_SCL_IO);
-}
+esp_err_t ssd1309_hw_init(i2c_master_bus_handle_t *bus_handle, i2c_master_dev_handle_t *dev_handle) {
 
-esp_err_t i2c_master_init(void) {
-    i2c_driver_delete(I2C_MASTER_NUM);
-    
-    i2c_bus_reset(); 
-
-    i2c_config_t conf = {
-        .mode = I2C_MODE_MASTER,
-        .sda_io_num = I2C_MASTER_SDA_IO,
+    // I2C Master bus configuration
+    i2c_master_bus_config_t i2c_mst_config = {
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .i2c_port = I2C_MASTER_NUM,
         .scl_io_num = I2C_MASTER_SCL_IO,
-        .sda_pullup_en = GPIO_PULLUP_ENABLE,
-        .scl_pullup_en = GPIO_PULLUP_ENABLE,
-        .master.clk_speed = 400000, // TWEAK THIS FOR PERFORMANCE
+        .sda_io_num = I2C_MASTER_SDA_IO,
+        .glitch_ignore_cnt = 7,
+        .flags.enable_internal_pullup = true,
     };
-    i2c_param_config(I2C_MASTER_NUM, &conf);
-    return i2c_driver_install(I2C_MASTER_NUM, conf.mode, 0, 0, 0);
+    // Allocate an I2C master bus
+    ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_mst_config, bus_handle));
+
+    // I2C device configuration
+    i2c_device_config_t dev_cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = SSD1309_ADDR,
+        .scl_speed_hz = 400000, // Fast-mode
+    };
+
+    // Add device to the master bus [cite: 580, 154]
+    return i2c_master_bus_add_device(*bus_handle, &dev_cfg, dev_handle);
 }
 
-void ssd1309_write_cmd(uint8_t command) {
-    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (SSD1309_ADDR << 1) | I2C_MASTER_WRITE, true);
-    i2c_master_write_byte(cmd, 0x00, true);
-    i2c_master_write_byte(cmd, command, true);
-    i2c_master_stop(cmd);
-    i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, 100 / portTICK_PERIOD_MS);
-    i2c_cmd_link_delete(cmd);
+void ssd1309_write_cmd(i2c_master_dev_handle_t dev_handle, uint8_t command) {
+    uint8_t cmd_buf[2] = {0x00, command}; // 0x00 indicates following byte is a command
+    // Perform write transaction using new driver [cite: 603, 254]
+    i2c_master_transmit(dev_handle, cmd_buf, sizeof(cmd_buf), -1);
 }
 
-// Driver core
-void ssd1309_init(void) {
+void ssd1309_init(i2c_master_dev_handle_t dev_handle) {
     // Hardware Reset
     gpio_set_direction(PIN_RES, GPIO_MODE_OUTPUT);
     gpio_set_level(PIN_RES, 0); vTaskDelay(pdMS_TO_TICKS(100));
     gpio_set_level(PIN_RES, 1); vTaskDelay(pdMS_TO_TICKS(100));
 
     // Clear Screen before turning on
-    uint8_t blank[128] = {0};
+    uint8_t blank[129];
+    blank[0] = 0x40; // 0x40 indicates following bytes are data
+    memset(&blank[1], 0, 128);
+
     for(int p=0; p<8; p++) {
-        ssd1309_write_cmd(0xB0 | p); 
-        ssd1309_write_cmd(0x00); ssd1309_write_cmd(0x10);
+        ssd1309_write_cmd(dev_handle, 0xB0 | p); 
+        ssd1309_write_cmd(dev_handle, 0x00); 
+        ssd1309_write_cmd(dev_handle, 0x10);
         
-        i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-        i2c_master_start(cmd);
-        i2c_master_write_byte(cmd, (SSD1309_ADDR << 1) | I2C_MASTER_WRITE, true);
-        i2c_master_write_byte(cmd, 0x40, true);
-        i2c_master_write(cmd, blank, 128, true);
-        i2c_master_stop(cmd);
-        i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, 50 / portTICK_PERIOD_MS);
-        i2c_cmd_link_delete(cmd);
+        i2c_master_transmit(dev_handle, blank, sizeof(blank), -1);
     }
 
     // Init Commands
-    ssd1309_write_cmd(0xAE); // OFF
+    ssd1309_write_cmd(dev_handle, 0xAE); // OFF
+    ssd1309_write_cmd(dev_handle, 0xFD); ssd1309_write_cmd(dev_handle, 0x12); // Unlock
+    ssd1309_write_cmd(dev_handle, 0x20); ssd1309_write_cmd(dev_handle, 0x02); // PAGE MODE
+    ssd1309_write_cmd(dev_handle, 0x81); ssd1309_write_cmd(dev_handle, 0x01); // Contrast
     
-    ssd1309_write_cmd(0xFD); ssd1309_write_cmd(0x12); // Unlock
-    ssd1309_write_cmd(0x20); ssd1309_write_cmd(0x02); // PAGE MODE
+    ssd1309_write_cmd(dev_handle, SSD1309_FLIP_X ? 0xA1 : 0xA0); 
+    ssd1309_write_cmd(dev_handle, SSD1309_FLIP_Y ? 0xC8 : 0xC0); 
     
-    ssd1309_write_cmd(0x81);
-    ssd1309_write_cmd(0x01); // 0xCF (DIM)
-    
-    ssd1309_write_cmd(SSD1309_FLIP_X ? 0xA1 : 0xA0); 
-    ssd1309_write_cmd(SSD1309_FLIP_Y ? 0xC8 : 0xC0); 
-    
-    ssd1309_write_cmd(0xA8); ssd1309_write_cmd(0x3F);
-    ssd1309_write_cmd(0xD3); ssd1309_write_cmd(0x00);
-    ssd1309_write_cmd(0x40); 
-    ssd1309_write_cmd(0xD5); ssd1309_write_cmd(0x80);
-    ssd1309_write_cmd(0xD9); ssd1309_write_cmd(0xF1); 
-    ssd1309_write_cmd(0xDA); ssd1309_write_cmd(0x12);
-    ssd1309_write_cmd(0xDB); ssd1309_write_cmd(0x40);
-    ssd1309_write_cmd(0xA4); 
-    ssd1309_write_cmd(0xA6); 
-    ssd1309_write_cmd(0xAF); // ON
+    ssd1309_write_cmd(dev_handle, 0xA8); ssd1309_write_cmd(dev_handle, 0x3F);
+    ssd1309_write_cmd(dev_handle, 0xD3); ssd1309_write_cmd(dev_handle, 0x00);
+    ssd1309_write_cmd(dev_handle, 0x40); 
+    ssd1309_write_cmd(dev_handle, 0xD5); ssd1309_write_cmd(dev_handle, 0x80);
+    ssd1309_write_cmd(dev_handle, 0xD9); ssd1309_write_cmd(dev_handle, 0xF1); 
+    ssd1309_write_cmd(dev_handle, 0xDA); ssd1309_write_cmd(dev_handle, 0x12);
+    ssd1309_write_cmd(dev_handle, 0xDB); ssd1309_write_cmd(dev_handle, 0x40);
+    ssd1309_write_cmd(dev_handle, 0xA4); 
+    ssd1309_write_cmd(dev_handle, 0xA6); 
+    ssd1309_write_cmd(dev_handle, 0xAF); // ON
 }
 
-// Returns error if the screen freezes, so Main can reset it
-esp_err_t ssd1309_display_buffer(uint8_t *buffer) {
-    esp_err_t ret = ESP_OK;
+esp_err_t ssd1309_display_buffer(i2c_master_dev_handle_t dev_handle, uint8_t *buffer) {
+    uint8_t tx_buf[129];
+    tx_buf[0] = 0x40; // Data control byte
 
-    // Fix top line
-    ssd1309_write_cmd(0x40); 
+    ssd1309_write_cmd(dev_handle, 0x40); 
 
     for (int page = 0; page < 8; page++) {
-        ssd1309_write_cmd(0xB0 | page); 
-        ssd1309_write_cmd(0x00); 
-        ssd1309_write_cmd(0x10); 
+        ssd1309_write_cmd(dev_handle, 0xB0 | page); 
+        ssd1309_write_cmd(dev_handle, 0x00); 
+        ssd1309_write_cmd(dev_handle, 0x10); 
 
-        i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-        i2c_master_start(cmd);
-        i2c_master_write_byte(cmd, (SSD1309_ADDR << 1) | I2C_MASTER_WRITE, true);
-        i2c_master_write_byte(cmd, 0x40, true);
-        i2c_master_write(cmd, &buffer[page * 128], 128, true);
-        i2c_master_stop(cmd);
+        memcpy(&tx_buf[1], &buffer[page * 128], 128);
         
-        // Freeze detection
-        esp_err_t err = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, 100 / portTICK_PERIOD_MS);
-        if (err != ESP_OK) ret = err;
-        
-        i2c_cmd_link_delete(cmd);
-        
-        if (ret != ESP_OK) return ret;
+        // Transmit page data [cite: 603]
+        esp_err_t err = i2c_master_transmit(dev_handle, tx_buf, sizeof(tx_buf), 100);
+        if (err != ESP_OK) return err;
     }
     return ESP_OK;
 }
@@ -290,7 +264,6 @@ void ssd1309_draw_string_large(uint8_t *buffer, int x, int y, int size, const ch
             uint8_t line = font[font_idx * 5 + col];
             for (int row = 0; row < 8; row++) {
                 if (line & (1 << row)) {
-                    // Draw a square of pixels for every 1 font pixel
                     ssd1309_draw_rect(buffer, cursor_x + (col * size), y + (row * size), size, size, 1, 1);
                 }
             }
@@ -315,11 +288,10 @@ void ssd1309_draw_line(uint8_t *buffer, int x0, int y0, int x1, int y1, int colo
 }
 
 void ssd1309_draw_bitmap(uint8_t *fb, int x, int y, const uint8_t *bitmap, int w, int h, int color) {
-    int byteWidth = (w + 7) / 8; // How many bytes per row
+    int byteWidth = (w + 7) / 8; 
     
     for (int j = 0; j < h; j++) {
         for (int i = 0; i < w; i++) {
-            // Read bit from the byte array
             if (bitmap[j * byteWidth + i / 8] & (128 >> (i & 7))) {
                 ssd1309_draw_pixel(fb, x + i, y + j, color);
             }

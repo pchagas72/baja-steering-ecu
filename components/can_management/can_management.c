@@ -67,12 +67,12 @@ bool can_update_state(car_state_t *state) {
             case ID_FUEL: // 0x500
                 state->fuel = msg.data[0] | (msg.data[1] << 8);
                 break;
-
+            /*
             case ID_ANGLE: // 0x205
                 state->roll  = (int16_t)(msg.data[0] | (msg.data[1] << 8));
                 state->pitch = (int16_t)(msg.data[2] | (msg.data[3] << 8));
                 break;
-
+            */
             case ID_ENG_TEMP: // 0x400
                 state->eng_temp = msg.data[0];
                 break;
